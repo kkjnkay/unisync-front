@@ -4,7 +4,6 @@ const nodemailer = require('nodemailer');
 
 const app = express();
 
-// 🔥 ДОЗВОЛЯЄМО ЗАПИТИ З ІНШИХ ДОМЕНІВ (щоб фронтенд на Vercel міг сюди стукати)
 app.use(cors({
     origin: '*', 
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -14,12 +13,11 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// 🔥 БАЗОВИЙ РОУТ ДЛЯ RENDER (Render буде перевіряти, чи сервер живий)
 app.get('/', (req, res) => {
     res.send('UniSync Backend is running! 🚀');
 });
 
-// Ендпоінт для перевірки підключення (працює з AddEmailForm.js)
+// Ендпоінт для перевірки підключення
 app.post('/check-email', async (req, res) => {
     const { email, appPassword } = req.body;
 
@@ -30,8 +28,9 @@ app.post('/check-email', async (req, res) => {
     try {
         const transporter = nodemailer.createTransport({
             host: 'smtp.gmail.com',
-            port: 465,
-            secure: true,
+            port: 587, // 🔥 Змінено з 465 на 587
+            secure: false, // 🔥 Для 587 має бути false
+            requireTLS: true, // 🔥 Примусове шифрування
             auth: {
                 user: email,
                 pass: appPassword 
@@ -41,9 +40,7 @@ app.post('/check-email', async (req, res) => {
             }
         });
 
-        // verify() намагається залогінитись на SMTP сервер
         await transporter.verify();
-        
         console.log(`✅ Підключення успішне для: ${email}`);
         res.status(200).send({ success: true, message: 'З\'єднання успішне' });
     } catch (error) {
@@ -55,23 +52,21 @@ app.post('/check-email', async (req, res) => {
 // Ендпоінт для відправки розсилки
 app.post('/api/send-single', async (req, res) => {
     const { senderAccount, subject, emailData } = req.body;
-
-    // Гнучка перевірка пароля, бо він може зберігатися під різними ключами
     const password = senderAccount?.smtpPassword || senderAccount?.appPassword || senderAccount?.password;
 
     if (!senderAccount || !senderAccount.email || !password) {
-        console.error('❌ Помилка: Неповні дані аккаунта відправника у запиті.');
         return res.status(400).send({ 
             success: false, 
-            error: 'Відсутні обов\'язкові дані авторизації (email або пароль) в БД.' 
+            error: 'Відсутні обов\'язкові дані авторизації в БД.' 
         });
     }
 
     try {
         const transporter = nodemailer.createTransport({
             host: senderAccount.smtpHost || 'smtp.gmail.com',
-            port: parseInt(senderAccount.smtpPort) || 465,
-            secure: parseInt(senderAccount.smtpPort) === 465, 
+            port: 587, // 🔥 Змінено на 587
+            secure: false, // 🔥 Для 587 має бути false
+            requireTLS: true, 
             auth: {
                 user: senderAccount.email,
                 pass: password 
@@ -81,7 +76,6 @@ app.post('/api/send-single', async (req, res) => {
             }
         });
 
-        // Формуємо ім'я відправника
         const senderName = `${senderAccount.firstName || ''} ${senderAccount.lastName || ''}`.trim() || 'Розподіл навантаження';
 
         await transporter.sendMail({
@@ -104,13 +98,11 @@ app.post('/api/send-single', async (req, res) => {
     }
 });
 
-// ДИНАМІЧНИЙ ПОРТ ДЛЯ RENDER
 const PORT = process.env.PORT || 3001;
-
-// 🔥 Важливо для Render: слухати '0.0.0.0'
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`==================================================`);
     console.log(`🚀 Бекенд розсилки UniSync успішно запущено!`);
     console.log(`📡 Сервер очікує на запити на порту: ${PORT}`);
     console.log(`==================================================`);
 });
+module.exports = app;

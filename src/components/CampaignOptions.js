@@ -4,11 +4,7 @@ import Papa from 'papaparse';
 import { db, auth } from '../firebase';
 import { collection, getDocs, query, where, addDoc, serverTimestamp, doc, updateDoc, increment } from 'firebase/firestore';
 
-// 🔥 КРОК 1: Визначаємо адресу бекенду залежно від оточення.
-// Якщо використовуєш Create React App:
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001';
-// Якщо використовуєш Vite, заміни верхній рядок на цей:
-// const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 const CampaignOptions = ({ campaignId }) => {
   const [emails, setEmails] = useState([]);
@@ -17,9 +13,14 @@ const CampaignOptions = ({ campaignId }) => {
   const [leads, setLeads] = useState([]);
   
   const [matchedData, setMatchedData] = useState([]);
+  
+  // Нові стани для нерозпізнаних викладачів
+  const [unmatchedGroups, setUnmatchedGroups] = useState([]);
+  const [showUnmatched, setShowUnmatched] = useState(false);
+  const [headerRowData, setHeaderRowData] = useState(null);
+
   const [isSending, setIsSending] = useState(false);
   const [sendProgress, setSendProgress] = useState(null); 
-  
   const [sentIndexes, setSentIndexes] = useState(new Set());
   const cancelRef = useRef(false); 
 
@@ -45,10 +46,46 @@ const CampaignOptions = ({ campaignId }) => {
     return s.replace(/[^А-ЯІЇЄҐ0-9]/g, '');
   };
 
+  // Винесені функції генерації HTML
+  const generateTableHtml = (headerRow, dataRows) => {
+    let htmlTable = `<table border="1" style="border-collapse: collapse; width: 100%; max-width: 900px; font-family: Arial, sans-serif; font-size: 14px; border: 1px solid #cbd5e1; margin-top: 15px;">`;
+    htmlTable += `<thead><tr style="background-color: #cbd5e1; color: #0f172a;">`;
+    headerRow.forEach((cell) => {
+      htmlTable += `<th style="padding: 10px 12px; border: 1px solid #94a3b8; text-align: left; font-weight: bold;">${cell !== undefined && cell !== null ? cell : ''}</th>`;
+    });
+    htmlTable += `</tr></thead><tbody>`;
+    
+    dataRows.forEach((r, rowIndex) => {
+      const bgStyle = rowIndex % 2 === 0 ? 'background-color: #ffffff;' : 'background-color: #f8fafc;';
+      htmlTable += `<tr style="${bgStyle}">`;
+      r.forEach((cell) => {
+        const isTotalRowInTable = r.some(c => c?.toString().toLowerCase().includes('підсумок') || c?.toString().toLowerCase().includes('всього'));
+        const fontWeight = isTotalRowInTable ? 'font-weight: bold; color: #1e293b; background-color: #f1f5f9;' : 'color: #334155;';
+        htmlTable += `<td style="padding: 10px 12px; border: 1px solid #cbd5e1; text-align: left; ${fontWeight}">${cell !== undefined && cell !== null ? cell : ''}</td>`;
+      });
+      htmlTable += '</tr>';
+    });
+    htmlTable += `</tbody></table>`;
+    return htmlTable;
+  };
+
+  const generateEmailHtml = (firstName, lastName, htmlTable) => {
+    return `
+      <div style="font-family: Arial, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px;">
+        <p style="font-size: 16px;">Доброго дня, <strong>${firstName} ${lastName || ''}</strong>!</p>
+        <p style="font-size: 14px; color: #475569;">Надсилаємо витяг із загального плану розподілу навчального навантаження:</p>
+        ${htmlTable}
+        <br><hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;">
+        <p style="font-size: 12px; color: #94a3b8;">Цей лист згенеровано автоматично.</p>
+      </div>
+    `;
+  };
+
   const processRows = (rows) => {
     if (!rows || rows.length === 0) return;
 
     const headerRow = rows[0]; 
+    setHeaderRowData(headerRow);
     const grouped = {};
     const knownLeads = leads.map(l => normalizeAbbrev(l.abbreviation)).filter(Boolean);
     
@@ -56,11 +93,11 @@ const CampaignOptions = ({ campaignId }) => {
 
     rows.forEach((row, index) => {
       if (!Array.isArray(row)) return;
-      if (index === 0) return; // Пропускаємо шапку документа
+      if (index === 0) return; 
 
       let foundKnownLead = null;
+      let possibleUnknownLead = null;
       let isTotalRow = false;
-      let isUnknownLead = false;
 
       for (let cell of row) {
         if (!cell) continue;
@@ -78,68 +115,43 @@ const CampaignOptions = ({ campaignId }) => {
 
         const justLetters = cellStr.replace(/[^А-ЯІЇЄҐA-Zа-яіїєґa-z]/g, '');
         if (justLetters.length >= 2 && justLetters.length <= 4 && justLetters === justLetters.toUpperCase() && cellStr.length < 10) {
-          isUnknownLead = true;
+          possibleUnknownLead = norm;
         }
       }
 
       const nonEmptyCellsCount = row.filter(c => c !== null && c !== undefined && c.toString().trim() !== '').length;
       const hasNumbers = row.some(c => c !== null && /\d/.test(c.toString()));
       if (nonEmptyCellsCount === 1 && !hasNumbers) {
-        isUnknownLead = true;
+        const val = row.find(c => c !== null && c !== undefined && c.toString().trim() !== '');
+        if (val) possibleUnknownLead = normalizeAbbrev(val.toString().trim());
       }
 
       if (foundKnownLead) {
         currentAbbrev = foundKnownLead; 
-      } else if (isUnknownLead) {
-        currentAbbrev = ''; 
+      } else if (possibleUnknownLead) {
+        currentAbbrev = possibleUnknownLead; 
+      }
+
+      if (isTotalRow) {
+        currentAbbrev = '';
       }
 
       if (currentAbbrev) {
         if (!grouped[currentAbbrev]) grouped[currentAbbrev] = [];
         grouped[currentAbbrev].push(row);
       }
-
-      if (isTotalRow) {
-        currentAbbrev = '';
-      }
     });
 
     const readyToSend = [];
+    const processedAbbrevs = new Set();
     
     leads.forEach(lead => {
       const leadAbbrev = normalizeAbbrev(lead.abbreviation);
       
       if (grouped[leadAbbrev] && grouped[leadAbbrev].length > 0) {
-        let htmlTable = `<table border="1" style="border-collapse: collapse; width: 100%; max-width: 900px; font-family: Arial, sans-serif; font-size: 14px; border: 1px solid #cbd5e1; margin-top: 15px;">`;
-        
-        htmlTable += `<thead><tr style="background-color: #cbd5e1; color: #0f172a;">`;
-        headerRow.forEach((cell) => {
-          htmlTable += `<th style="padding: 10px 12px; border: 1px solid #94a3b8; text-align: left; font-weight: bold;">${cell !== undefined && cell !== null ? cell : ''}</th>`;
-        });
-        htmlTable += `</tr></thead><tbody>`;
-        
-        grouped[leadAbbrev].forEach((r, rowIndex) => {
-          const bgStyle = rowIndex % 2 === 0 ? 'background-color: #ffffff;' : 'background-color: #f8fafc;';
-          htmlTable += `<tr style="${bgStyle}">`;
-          
-          r.forEach((cell) => {
-            const isTotalRowInTable = r.some(c => c?.toString().toLowerCase().includes('підсумок') || c?.toString().toLowerCase().includes('всього'));
-            const fontWeight = isTotalRowInTable ? 'font-weight: bold; color: #1e293b; background-color: #f1f5f9;' : 'color: #334155;';
-            htmlTable += `<td style="padding: 10px 12px; border: 1px solid #cbd5e1; text-align: left; ${fontWeight}">${cell !== undefined && cell !== null ? cell : ''}</td>`;
-          });
-          htmlTable += '</tr>';
-        });
-        htmlTable += `</tbody></table>`;
-
-        const emailHtmlBody = `
-          <div style="font-family: Arial, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px;">
-            <p style="font-size: 16px;">Доброго дня, <strong>${lead.firstName} ${lead.lastName || ''}</strong>!</p>
-            <p style="font-size: 14px; color: #475569;">Надсилаємо витяг із загального плану розподілу навчального навантаження:</p>
-            ${htmlTable}
-            <br><hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;">
-            <p style="font-size: 12px; color: #94a3b8;">Цей лист згенеровано автоматично.</p>
-          </div>
-        `;
+        processedAbbrevs.add(leadAbbrev);
+        const htmlTable = generateTableHtml(headerRow, grouped[leadAbbrev]);
+        const emailHtmlBody = generateEmailHtml(lead.firstName, lead.lastName, htmlTable);
 
         readyToSend.push({ 
           to: lead.email, 
@@ -165,18 +177,79 @@ const CampaignOptions = ({ campaignId }) => {
       }
     });
 
+    // Формуємо список пропущених (невідомих) скорочень
+    const unmatched = [];
+    Object.keys(grouped).forEach(abbrev => {
+      if (!processedAbbrevs.has(abbrev) && abbrev.length > 0) {
+        unmatched.push({
+          abbreviation: abbrev,
+          rows: grouped[abbrev],
+          tempFirstName: '',
+          tempLastName: '',
+          tempEmail: ''
+        });
+      }
+    });
+
     readyToSend.sort((a, b) => {
       if (a.hasData === b.hasData) return 0;
       return a.hasData ? 1 : -1;
     });
 
-    const hasAnyMatches = readyToSend.some(item => item.hasData);
-    if (!hasAnyMatches && readyToSend.length > 0) {
-      alert("⚠️ Жодного збігу по скороченнях не знайдено! Всі викладачі отримають лист про відсутність навантаження. Перевірте файл, якщо це помилка.");
+    setMatchedData(readyToSend);
+    setUnmatchedGroups(unmatched);
+    setSentIndexes(new Set()); 
+  };
+
+  const handleUnmatchedChange = (index, field, value) => {
+    setUnmatchedGroups(prev => {
+      const updated = [...prev];
+      updated[index][field] = value;
+      return updated;
+    });
+  };
+
+  const handleSaveUnmatched = async (index) => {
+    const group = unmatchedGroups[index];
+    if (!group.tempFirstName || !group.tempEmail) {
+      return alert("Ім'я та Email є обов'язковими для додавання викладача!");
     }
 
-    setMatchedData(readyToSend);
-    setSentIndexes(new Set()); 
+    const newLead = {
+      firstName: group.tempFirstName,
+      lastName: group.tempLastName,
+      email: group.tempEmail,
+      abbreviation: group.abbreviation,
+      campaignId: campaignId
+    };
+
+    const htmlTable = generateTableHtml(headerRowData, group.rows);
+    const emailHtmlBody = generateEmailHtml(newLead.firstName, newLead.lastName, htmlTable);
+
+    const newMatchedItem = {
+      to: newLead.email,
+      name: newLead.firstName,
+      lastName: newLead.lastName,
+      hasData: true,
+      skipSending: false,
+      htmlBody: emailHtmlBody,
+      tableRows: [headerRowData, ...group.rows],
+      message: ''
+    };
+
+    setMatchedData(prev => [newMatchedItem, ...prev]);
+    setUnmatchedGroups(prev => prev.filter((_, i) => i !== index));
+
+    try {
+      await addDoc(collection(db, 'leads'), {
+        ...newLead,
+        ownerUid: auth.currentUser?.uid,
+        createdAt: serverTimestamp()
+      });
+      setLeads(prev => [...prev, newLead]);
+    } catch (error) {
+      console.error("Не вдалося зберегти викладача в БД:", error);
+    }
   };
 
   const handleCustomMessageChange = (index, newText) => {
@@ -213,7 +286,7 @@ const CampaignOptions = ({ campaignId }) => {
       reader.onload = (evt) => {
         const wb = XLSX.read(evt.target.result, { type: 'binary' });
         const wsname = wb.SheetNames[0];
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wsname], { header: 1 });
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wsname], { header: 1, defval: "" });
         processRows(rows);
       };
       reader.readAsBinaryString(file);
@@ -283,7 +356,6 @@ const CampaignOptions = ({ campaignId }) => {
         `;
       
       try {
-        // 🔥 КРОК 1 (Продовження): Використовуємо API_URL для відправки
         const response = await fetch(`${API_URL}/api/send-single`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -392,6 +464,58 @@ const CampaignOptions = ({ campaignId }) => {
         <div className="upload-subtext">Програма автоматично розріже її та підготує листи за скороченнями</div>
         <input type="file" accept=".csv, .xlsx, .xls" onChange={handleMasterFileUpload} />
       </div>
+
+      {unmatchedGroups.length > 0 && (
+        <div style={{ marginTop: '30px', padding: '24px', background: '#fffbeb', border: '2px dashed #f59e0b', borderRadius: 'var(--radius-lg)' }}>
+          <h3 style={{ color: '#d97706', marginTop: 0, marginBottom: '10px' }}>
+            ⚠️ Знайдено невідомі скорочення ({unmatchedGroups.length})
+          </h3>
+          <p style={{ color: '#b45309', marginBottom: '20px', fontSize: '14px' }}>
+            Ці частини навантаження не знайдено в базі. Заповніть дані, щоб програма їх запам'ятала та додала до поточної розсилки.
+          </p>
+          
+          <button 
+            onClick={() => setShowUnmatched(!showUnmatched)} 
+            style={{ padding: '10px 20px', background: '#f59e0b', color: '#fff', border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontWeight: 'bold' }}
+          >
+            {showUnmatched ? "Сховати список" : "Переглянути та заповнити"}
+          </button>
+
+          {showUnmatched && (
+            <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
+              {unmatchedGroups.map((group, idx) => (
+                <div key={idx} style={{ background: '#fff', padding: '15px', borderRadius: '8px', border: '1px solid #fcd34d', display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center' }}>
+                  <strong style={{ fontSize: '18px', color: '#b45309', minWidth: '80px' }}>{group.abbreviation}</strong>
+                  <input
+                    type="text" placeholder="Ім'я" className="search-input" 
+                    style={{ width: '130px', margin: 0, padding: '8px' }}
+                    value={group.tempFirstName} 
+                    onChange={e => handleUnmatchedChange(idx, 'tempFirstName', e.target.value)}
+                  />
+                  <input
+                    type="text" placeholder="Прізвище" className="search-input" 
+                    style={{ width: '130px', margin: 0, padding: '8px' }}
+                    value={group.tempLastName} 
+                    onChange={e => handleUnmatchedChange(idx, 'tempLastName', e.target.value)}
+                  />
+                  <input
+                    type="email" placeholder="Email" className="search-input" 
+                    style={{ width: '220px', margin: 0, padding: '8px' }}
+                    value={group.tempEmail} 
+                    onChange={e => handleUnmatchedChange(idx, 'tempEmail', e.target.value)}
+                  />
+                  <button
+                    onClick={() => handleSaveUnmatched(idx)}
+                    style={{ padding: '9px 15px', background: '#10b981', color: '#fff', border: 'none', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
+                  >
+                    ➕ Додати
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {matchedData.length > 0 && (
         <div style={{ marginTop: '40px' }}>
