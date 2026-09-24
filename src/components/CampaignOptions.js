@@ -132,10 +132,6 @@ const CampaignOptions = ({ campaignId }) => {
         currentAbbrev = possibleUnknownLead; 
       }
 
-      if (isTotalRow) {
-        currentAbbrev = '';
-      }
-
       if (currentAbbrev) {
         if (!grouped[currentAbbrev]) grouped[currentAbbrev] = [];
         grouped[currentAbbrev].push(row);
